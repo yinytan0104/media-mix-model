@@ -6,7 +6,24 @@ import streamlit as st
 from mmm import (CHANNELS, LABELS, HOLDOUT_WEEKS, channel_summary, fit, forecast,
                  load_data, marginal_roas, optimize_budget, weekly_response)
 
-st.set_page_config(page_title="Media Mix Model & Budget Simulator", layout="wide")
+st.set_page_config(page_title="Ad Budget Simulator", page_icon="📊", layout="wide")
+
+COLORS = {"tv_S": "#4C78A8", "ooh_S": "#F58518", "print_S": "#B279A2",
+          "facebook_S": "#54A24B", "search_S": "#E45756"}
+DIGITAL = ["facebook_S", "search_S"]
+TRADITIONAL = ["tv_S", "ooh_S", "print_S"]
+
+
+def money(x: float, sign: bool = False) -> str:
+    s = "+" if sign and x > 0 else ("-" if x < 0 else "")
+    x = abs(x)
+    if x >= 1e6:
+        v = f"${x / 1e6:.1f}M"
+    elif x >= 1e3:
+        v = f"${x / 1e3:.0f}K" if x >= 1e4 else f"${x / 1e3:.1f}K"
+    else:
+        v = f"${x:,.0f}"
+    return s + v
 
 
 @st.cache_resource
@@ -16,157 +33,228 @@ def get_model():
 
 
 df, model = get_model()
-current = {c: float(df[c].iloc[-52:].mean()) for c in CHANNELS}
-total_now = sum(current.values())
+today = {c: float(df[c].iloc[-52:].mean()) for c in CHANNELS}
+today_total = sum(today.values())
+best_today = optimize_budget(model, today, today_total)
 
-st.title("Media Mix Model & Budget Simulator")
-st.caption("Which ad channels actually drive revenue, and what happens if you move the budget around? "
-           "Built on Meta Robyn's public simulated dataset: 208 weeks of spend across TV, out-of-home, "
-           "print, Facebook, and search.")
 
-m = model.metrics
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Holdout accuracy (MAPE)", f"{m['holdout_mape']:.1f}% error",
-          help=f"Average error on the last {HOLDOUT_WEEKS} weeks, which the model never saw during training.")
-c2.metric("Holdout R²", f"{m['holdout_r2']:.2f}")
-c3.metric("Avg weekly media budget", f"${total_now:,.0f}", help="Average over the last 52 weeks.")
-c4.metric("Channels modeled", len(CHANNELS))
+def ads_revenue(plan: dict) -> float:
+    return float(sum(weekly_response(model, c, plan[c]) for c in CHANNELS))
 
-tab1, tab2, tab3, tab4 = st.tabs(["What drives revenue", "Budget simulator", "Forecast", "How it works"])
 
-# ---------- Tab 1 ----------
+def set_plan(plan: dict):
+    for c in CHANNELS:
+        st.session_state[f"s_{c}"] = float(round(plan[c]))
+
+
+if "s_tv_S" not in st.session_state:
+    set_plan(today)
+
+# ---------------- Sidebar: the controls ----------------
+with st.sidebar:
+    st.header("Your weekly ad budget")
+    st.caption("Pick a quick scenario, or drag the sliders yourself. Everything on the page updates.")
+
+    b1, b2 = st.columns(2)
+    if b1.button("Today's mix", width="stretch"):
+        set_plan(today)
+    if b2.button("⭐ Best split", width="stretch", help="Same total budget, split the smartest way."):
+        set_plan(best_today)
+    b3, b4 = st.columns(2)
+    if b3.button("Cut 20%", width="stretch", help="Same mix as today, 20% less money."):
+        set_plan({c: today[c] * 0.8 for c in CHANNELS})
+    if b4.button("More digital", width="stretch",
+                 help="Move 20% of TV, billboard, and print money into Facebook and search."):
+        moved = sum(today[c] * 0.2 for c in TRADITIONAL)
+        dig_total = sum(today[c] for c in DIGITAL)
+        p = {c: today[c] * 0.8 for c in TRADITIONAL}
+        p.update({c: today[c] + moved * today[c] / dig_total for c in DIGITAL})
+        set_plan(p)
+
+    st.divider()
+    plan = {}
+    for c in CHANNELS:
+        plan[c] = st.slider(f"{LABELS[c]}  (today: {money(today[c])})", 0.0, float(round(today[c] * 3, -2)),
+                            step=100.0, key=f"s_{c}", format="$%d")
+    plan_total = sum(plan.values())
+    bd = plan_total - today_total
+    st.metric("Total weekly budget", money(plan_total),
+              f"{money(bd, sign=True)} vs today" if abs(bd) > 50 else "same as today", delta_color="off")
+
+    out = pd.DataFrame({"Channel": [LABELS[c] for c in CHANNELS],
+                        "Weekly spend today": [round(today[c]) for c in CHANNELS],
+                        "Weekly spend in plan": [round(plan[c]) for c in CHANNELS],
+                        "Weekly revenue from ads (plan)": [round(float(weekly_response(model, c, plan[c])))
+                                                           for c in CHANNELS]})
+    st.download_button("Download this plan (CSV)", out.to_csv(index=False), "ad_budget_plan.csv",
+                       width="stretch")
+
+# ---------------- Header ----------------
+st.title("📊 Ad Budget Simulator")
+st.markdown("**Which ads actually bring in money, and what happens if you move the budget around?** "
+            "This tool learned from 4 years of weekly ad spend and sales, so you can test budget ideas "
+            "before spending a dollar.")
+
+with st.expander("👋 New here? How to use this in 30 seconds", expanded=True):
+    st.markdown(
+        "1. **Look at the 3 cards below** for the main takeaways.\n"
+        "2. **Use the sidebar on the left** (tap › on your phone) to try a budget. "
+        "Click **⭐ Best split** to see what the smartest split looks like.\n"
+        "3. **Check the tabs** to see what changed, and what it means for the next 12 weeks.\n\n"
+        "*The data is Meta's public sample dataset of a made-up company, so the numbers are a demo.*")
+
+# ---------------- Headline cards ----------------
+marg_today = {c: marginal_roas(model, c, today[c]) for c in CHANNELS}
+best_ch = max(marg_today, key=marg_today.get)
+worst_ch = min(marg_today, key=marg_today.get)
+gain = ads_revenue(best_today) - ads_revenue(today)
+k1, k2, k3 = st.columns(3)
+k1.metric("Best place for the next dollar", LABELS[best_ch],
+          f"about ${marg_today[best_ch]:.2f} back per $1", delta_color="off")
+k2.metric("Most maxed-out channel", LABELS[worst_ch],
+          f"only ${marg_today[worst_ch]:.2f} back per extra $1", delta_color="off")
+k3.metric("Same budget, smarter split", f"{money(gain, sign=True)} a week",
+          f"{gain / ads_revenue(today) * 100:+.0f}% more sales from ads")
+
+st.divider()
+tab1, tab2, tab3, tab4 = st.tabs(["🧪 Your plan", "💡 What's working", "📈 Next 12 weeks", "❓ How it works"])
+
+# ---------------- Tab 1: plan results ----------------
 with tab1:
+    rev_today, rev_plan = ads_revenue(today), ads_revenue(plan)
+    if abs(rev_plan - rev_today) < 0.002 * rev_today:
+        rev_plan = rev_today
+    st.caption("Change the budget in the sidebar and these numbers update.")
+    a, b, c_ = st.columns(3)
+    a.metric("Weekly sales from ads", money(rev_plan),
+             f"{money(rev_plan - rev_today, sign=True)} vs today" if rev_plan != rev_today else "same as today",
+             delta_color="normal" if rev_plan != rev_today else "off")
+    b.metric("Back per $1 spent", f"${rev_plan / plan_total:.2f}" if plan_total else "n/a",
+             f"{(rev_plan / plan_total) - (rev_today / today_total):+.2f} vs today"
+             if plan_total and rev_plan != rev_today else None)
+    c_.metric("Over a year", money((rev_plan - rev_today) * 52, sign=True), "extra sales vs today's mix",
+              delta_color="off")
+
+    # plain-language summary
+    changes = sorted(CHANNELS, key=lambda c: plan[c] - today[c])
+    up, down = changes[-1], changes[0]
+    verdict = "more" if rev_plan > rev_today else ("less" if rev_plan < rev_today else "about the same")
+    if verdict == "about the same":
+        lines = ["**In plain words:** this plan brings in **about the same** sales from ads as today."]
+    else:
+        lines = [f"**In plain words:** this plan brings in **{verdict}** sales from ads than today "
+                 f"({money(rev_plan - rev_today, sign=True)} a week)."]
+    if plan[up] - today[up] > 50:
+        lines.append(f"The biggest increase is **{LABELS[up]}** ({money(plan[up] - today[up], sign=True)} a week).")
+    if today[down] - plan[down] > 50:
+        lines.append(f"The biggest cut is **{LABELS[down]}** ({money(plan[down] - today[down], sign=True)} a week).")
+    marg_plan = {c: marginal_roas(model, c, plan[c]) for c in CHANNELS}
+    hi, lo = max(marg_plan, key=marg_plan.get), min(marg_plan, key=marg_plan.get)
+    lines.append(f"If you had one more dollar, put it in **{LABELS[hi]}** (about ${marg_plan[hi]:.2f} back). "
+                 f"**{LABELS[lo]}** gives the least for extra money (about ${marg_plan[lo]:.2f}).")
+    st.info(" ".join(lines))
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="Today", x=[LABELS[c] for c in CHANNELS], y=[today[c] for c in CHANNELS],
+                         marker_color="#C9C9C9"))
+    fig.add_trace(go.Bar(name="Your plan", x=[LABELS[c] for c in CHANNELS], y=[plan[c] for c in CHANNELS],
+                         marker_color=[COLORS[c] for c in CHANNELS]))
+    fig.update_layout(barmode="group", height=340, margin=dict(l=0, r=0, t=30, b=0),
+                      title="Weekly spend by channel", yaxis_title="Weekly spend ($)",
+                      legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(fig, width="stretch")
+
+# ---------------- Tab 2: what's working ----------------
+with tab2:
     summ = channel_summary(model, df)
-    left, right = st.columns([1.1, 1])
+    st.markdown("**Two ways to judge a channel.** How much it earned on average last year, and how much "
+                "*one more dollar* would earn today. They can be very different, because every channel "
+                "pays off less as you spend more on it.")
+    left, right = st.columns(2)
     with left:
-        st.subheader("Return on ad spend, last 52 weeks")
         fig = go.Figure(go.Bar(x=summ["roas"], y=summ["channel"], orientation="h",
+                               marker_color=[COLORS[k] for k in summ["key"]],
                                text=[f"${v:.2f}" for v in summ["roas"]], textposition="outside"))
-        fig.update_layout(height=320, margin=dict(l=0, r=40, t=10, b=0),
-                          xaxis_title="Revenue per $1 spent", yaxis=dict(autorange="reversed"))
+        fig.update_layout(height=300, margin=dict(l=0, r=50, t=40, b=0), title="Average: $ back per $1, last year",
+                          yaxis=dict(autorange="reversed"), xaxis=dict(showticklabels=False))
         st.plotly_chart(fig, width="stretch")
     with right:
-        st.subheader("Where the next dollar works hardest")
-        marg = pd.DataFrame({"Channel": [LABELS[c] for c in CHANNELS],
-                             "Weekly spend now": [current[c] for c in CHANNELS],
-                             "Revenue from next $1": [marginal_roas(model, c, current[c]) for c in CHANNELS],
-                             "Ad effect lingers (weeks)": [1 / (1 - model.params[c]["decay"]) for c in CHANNELS]})
-        marg = marg.sort_values("Revenue from next $1", ascending=False)
-        st.dataframe(marg.style.format({"Weekly spend now": "${:,.0f}", "Revenue from next $1": "${:.2f}",
-                                        "Ad effect lingers (weeks)": "{:.1f}"}),
-                     hide_index=True, width="stretch")
-        st.caption("Average return shows past performance. The next-dollar return shows where extra money "
-                   "would help most, since every channel gets less efficient as spend goes up.")
+        order = sorted(CHANNELS, key=lambda c: marg_today[c], reverse=True)
+        fig = go.Figure(go.Bar(x=[marg_today[c] for c in order], y=[LABELS[c] for c in order], orientation="h",
+                               marker_color=[COLORS[c] for c in order],
+                               text=[f"${marg_today[c]:.2f}" for c in order], textposition="outside"))
+        fig.update_layout(height=300, margin=dict(l=0, r=50, t=40, b=0), title="Next dollar: $ back per extra $1 today",
+                          yaxis=dict(autorange="reversed"), xaxis=dict(showticklabels=False))
+        st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Weekly revenue: actual vs. model, split by source")
+    st.subheader("More spend, smaller gains")
+    st.caption("Each line shows weekly sales from a channel as you spend more on it. The dot is where you are "
+               "today. Where a line flattens out, extra money doesn't buy much.")
+    fig = go.Figure()
+    for c in CHANNELS:
+        xs = np.linspace(0, today[c] * 3, 80)
+        fig.add_trace(go.Scatter(x=xs, y=weekly_response(model, c, xs), name=LABELS[c],
+                                 line=dict(color=COLORS[c], width=3)))
+        fig.add_trace(go.Scatter(x=[today[c]], y=[weekly_response(model, c, today[c])], mode="markers",
+                                 marker=dict(size=11, color=COLORS[c], line=dict(color="white", width=2)),
+                                 showlegend=False, hoverinfo="skip"))
+    fig.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Weekly spend ($)",
+                      yaxis_title="Weekly sales from this channel ($)", legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Where weekly sales came from")
+    st.caption("The gray area is sales the company would get with no ads at all. Each color on top is what "
+               "a channel added. The black line is real sales.")
     contrib = model.contributions(df) * 1e6
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["DATE"], y=contrib["baseline"], name="Baseline (no ads)",
-                             stackgroup="one", line=dict(width=0)))
+    fig.add_trace(go.Scatter(x=df["DATE"], y=contrib["baseline"], name="Without ads", stackgroup="one",
+                             line=dict(width=0), fillcolor="rgba(180,180,180,0.6)"))
     for c in CHANNELS:
-        fig.add_trace(go.Scatter(x=df["DATE"], y=contrib[c], name=LABELS[c], stackgroup="one", line=dict(width=0)))
-    fig.add_trace(go.Scatter(x=df["DATE"], y=df["revenue"], name="Actual revenue", line=dict(color="black", width=2)))
-    fig.add_vrect(x0=df["DATE"].iloc[-HOLDOUT_WEEKS], x1=df["DATE"].iloc[-1], fillcolor="gray", opacity=0.1,
-                  annotation_text="holdout", annotation_position="top left")
-    fig.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Revenue ($)",
+        fig.add_trace(go.Scatter(x=df["DATE"], y=contrib[c], name=LABELS[c], stackgroup="one",
+                                 line=dict(width=0, color=COLORS[c])))
+    fig.add_trace(go.Scatter(x=df["DATE"], y=df["revenue"], name="Real sales", line=dict(color="black", width=2)))
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Weekly sales ($)",
                       legend=dict(orientation="h", y=-0.15))
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Response curves: how revenue grows with weekly spend")
-    fig = go.Figure()
-    for c in CHANNELS:
-        xs = np.linspace(0, current[c] * 3, 80)
-        fig.add_trace(go.Scatter(x=xs, y=weekly_response(model, c, xs), name=LABELS[c]))
-        fig.add_trace(go.Scatter(x=[current[c]], y=[weekly_response(model, c, current[c])], mode="markers",
-                                 marker=dict(size=9), showlegend=False, hovertext=f"{LABELS[c]} today"))
-    fig.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Weekly spend ($)",
-                      yaxis_title="Weekly revenue driven ($)")
-    st.plotly_chart(fig, width="stretch")
-    st.caption("Dots mark today's spend. Where a curve flattens, more money buys less extra revenue.")
-
-# ---------- Tab 2 ----------
-with tab2:
-    st.subheader("Move the budget and see what happens")
-    total = st.number_input("Total weekly media budget ($)", min_value=1000.0, value=float(round(total_now)),
-                            step=1000.0)
-    if "opt" not in st.session_state:
-        st.session_state.opt = None
-    if st.button("Find the best split for this budget"):
-        st.session_state.opt = optimize_budget(model, current, total)
-    start = st.session_state.opt or {c: current[c] / total_now * total for c in CHANNELS}
-
-    cols = st.columns(len(CHANNELS))
-    plan = {}
-    for col, c in zip(cols, CHANNELS):
-        plan[c] = col.slider(LABELS[c], 0.0, float(round(current[c] * 3, -2)), float(start[c]),
-                             step=1.0, key=f"s_{c}_{round(start[c])}")
-    plan_total = sum(plan.values())
-    base_rev = sum(weekly_response(model, c, current[c]) for c in CHANNELS)
-    new_rev = sum(weekly_response(model, c, plan[c]) for c in CHANNELS)
-
-    a, b, c_ = st.columns(3)
-    a.metric("Plan's weekly spend", f"${plan_total:,.0f}", f"{plan_total - total_now:+,.0f} vs today")
-    b.metric("Weekly revenue from ads", f"${new_rev:,.0f}", f"{new_rev - base_rev:+,.0f} vs today")
-    c_.metric("Overall return", f"${new_rev / plan_total:.2f} per $1" if plan_total else "n/a")
-
-    comp = pd.DataFrame({"Channel": [LABELS[c] for c in CHANNELS],
-                         "Today": [current[c] for c in CHANNELS], "Plan": [plan[c] for c in CHANNELS]})
-    fig = go.Figure([go.Bar(name="Today", x=comp["Channel"], y=comp["Today"]),
-                     go.Bar(name="Plan", x=comp["Channel"], y=comp["Plan"])])
-    fig.update_layout(barmode="group", height=320, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Weekly spend ($)")
-    st.plotly_chart(fig, width="stretch")
-    st.caption("The optimizer keeps each channel between 30% and 300% of today's spend, so it won't "
-               "suggest anything a real team couldn't actually do.")
-
-    st.subheader("Plain-language summary")
-    ranked = sorted(CHANNELS, key=lambda c: marginal_roas(model, c, plan[c]), reverse=True)
-    moves = sorted(CHANNELS, key=lambda c: plan[c] - current[c])
-    st.write(
-        f"Under this plan, ads drive about **${new_rev:,.0f} a week**, "
-        f"{'up' if new_rev >= base_rev else 'down'} **${abs(new_rev - base_rev):,.0f}** from today "
-        f"({(new_rev / base_rev - 1) * 100:+.1f}%). "
-        f"The biggest shift is {'into' if plan[moves[-1]] > current[moves[-1]] else 'out of'} "
-        f"**{LABELS[moves[-1]]}** and away from **{LABELS[moves[0]]}**. "
-        f"At these levels, the next dollar works hardest in **{LABELS[ranked[0]]}** "
-        f"(about ${marginal_roas(model, ranked[0], plan[ranked[0]]):.2f} back) and least in "
-        f"**{LABELS[ranked[-1]]}** (about ${marginal_roas(model, ranked[-1], plan[ranked[-1]]):.2f})."
-    )
-
-# ---------- Tab 3 ----------
+# ---------------- Tab 3: forecast ----------------
 with tab3:
-    st.subheader("Next 12 weeks: today's mix vs. your plan")
-    st.caption("Uses the plan from the Budget simulator tab. Assumes competitor sales and newsletters follow "
-               "the same weeks last year, with no special events.")
-    fc_today = forecast(model, df, current)
+    st.caption("What the next 12 weeks could look like with today's mix vs. your plan from the sidebar.")
+    fc_today = forecast(model, df, today)
     fc_plan = forecast(model, df, plan)
+    diff = fc_plan["forecast"].sum() - fc_today["forecast"].sum()
+    if abs(diff) < 0.002 * fc_today["forecast"].sum():
+        diff = 0.0
+    st.metric("Extra sales over the next 12 weeks", money(diff, sign=True), "your plan vs. today's mix",
+              delta_color="off")
     hist = df.iloc[-26:]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hist["DATE"], y=hist["revenue"], name="Actual", line=dict(color="black")))
-    fig.add_trace(go.Scatter(x=fc_today["DATE"], y=fc_today["forecast"], name="Forecast: today's mix",
-                             line=dict(dash="dot")))
-    fig.add_trace(go.Scatter(x=fc_plan["DATE"], y=fc_plan["forecast"], name="Forecast: your plan"))
-    fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Weekly revenue ($)",
+    fig.add_trace(go.Scatter(x=hist["DATE"], y=hist["revenue"], name="Past sales", line=dict(color="black")))
+    fig.add_trace(go.Scatter(x=fc_today["DATE"], y=fc_today["forecast"], name="Today's mix",
+                             line=dict(dash="dot", color="#888")))
+    fig.add_trace(go.Scatter(x=fc_plan["DATE"], y=fc_plan["forecast"], name="Your plan",
+                             line=dict(color="#E45756", width=3)))
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Weekly sales ($)",
                       legend=dict(orientation="h", y=-0.15))
     st.plotly_chart(fig, width="stretch")
-    diff = fc_plan["forecast"].sum() - fc_today["forecast"].sum()
-    st.metric("12-week revenue difference vs. today's mix", f"${diff:+,.0f}")
+    st.caption("Assumes competitors and email newsletters look like the same weeks last year, with no special events.")
 
-# ---------- Tab 4 ----------
+# ---------------- Tab 4: how it works ----------------
 with tab4:
+    m = model.metrics
     st.markdown(f"""
-**The model.** Weekly revenue = baseline + the effect of each ad channel.
+**The idea.** Weekly sales = sales you'd get anyway + what each ad channel adds.
 
-- **Baseline:** trend, yearly seasonality, competitor sales, newsletters, and special events.
-- **Carryover (adstock):** an ad keeps working for a few weeks after it runs. Each channel gets its own decay rate.
-- **Diminishing returns (Hill curve):** each extra dollar in a channel buys a little less than the last one.
-- **Fitting:** a random search over carryover and saturation settings, with a linear fit for everything else.
-  Ad effects are kept non-negative, so no channel can "hurt" sales just to make the math fit.
+**Three things the model knows about ads:**
+- **Ads keep working for a while.** A TV ad this week still nudges sales next week. Each channel fades at its own speed.
+- **More spend, smaller gains.** The first $1,000 on a channel does more than the tenth $1,000.
+- **Not everything is ads.** It also accounts for growth over time, seasons, competitors, email newsletters, and big events.
 
-**Checking it.** The model was tuned on the first {len(df) - HOLDOUT_WEEKS} weeks and tested on the last
-{HOLDOUT_WEEKS}, which it never saw. Holdout error: **{m['holdout_mape']:.1f}% MAPE**, R² **{m['holdout_r2']:.2f}**.
+**Can you trust it?** I trained it on the first {len(df) - HOLDOUT_WEEKS} weeks, then tested it on the last
+{HOLDOUT_WEEKS} weeks it had never seen. Its predictions were off by about **{m['holdout_mape']:.0f}%** on average.
 
-**Limits.** This is a simple, transparent MMM, not a full Bayesian one like Google's Meridian or Meta's Robyn.
-It doesn't give uncertainty ranges, and the data is simulated, so treat the exact numbers as a demo.
+**Limits.** This is a simple model built to be easy to understand. Bigger tools like Google's Meridian or
+Meta's Robyn also show how confident each number is. The data is a made-up company, so treat the numbers as a demo.
 
-**Data:** [Meta Robyn sample dataset](https://github.com/facebookexperimental/Robyn) (`dt_simulated_weekly`).
+**Data:** [Meta Robyn sample dataset](https://github.com/facebookexperimental/Robyn) · Built by Yin Yin Tan
 """)
