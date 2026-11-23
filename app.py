@@ -78,8 +78,8 @@ with st.sidebar:
                             step=100.0, key=f"s_{c}", format="$%d")
     plan_total = sum(plan.values())
     bd = plan_total - today_total
-    st.metric("Total weekly budget", money(plan_total),
-              f"{money(bd, sign=True)} vs today" if abs(bd) > 50 else "same as today", delta_color="off")
+    st.metric("Total weekly budget", money(plan_total))
+    st.caption(f"{money(bd, sign=True)} vs today" if abs(bd) > 50 else "Same as today")
 
     out = pd.DataFrame({"Channel": [LABELS[c] for c in CHANNELS],
                         "Weekly spend today": [round(today[c]) for c in CHANNELS],
@@ -98,7 +98,7 @@ st.markdown("**Which ads actually bring in money, and what happens if you move t
 with st.expander("👋 New here? How to use this in 30 seconds", expanded=True):
     st.markdown(
         "1. **Look at the 3 cards below** for the main takeaways.\n"
-        "2. **Use the sidebar on the left** (tap › on your phone) to try a budget. "
+        "2. **Use the sidebar on the left** (on a phone, tap » at the top left) to try a budget. "
         "Click **⭐ Best split** to see what the smartest split looks like.\n"
         "3. **Check the tabs** to see what changed, and what it means for the next 12 weeks.\n\n"
         "*The data is Meta's public sample dataset of a made-up company, so the numbers are a demo.*")
@@ -108,13 +108,21 @@ marg_today = {c: marginal_roas(model, c, today[c]) for c in CHANNELS}
 best_ch = max(marg_today, key=marg_today.get)
 worst_ch = min(marg_today, key=marg_today.get)
 gain = ads_revenue(best_today) - ads_revenue(today)
+def card(col, label, value, note):
+    with col.container(border=True):
+        st.caption(label)
+        st.markdown(f"<div style='font-size:1.35rem;font-weight:600;line-height:1.25;margin:-4px 0 6px;white-space:nowrap'>{value}</div>",
+                    unsafe_allow_html=True)
+        st.caption(note)
+
+
 k1, k2, k3 = st.columns(3)
-k1.metric("Best place for the next dollar", LABELS[best_ch],
-          f"about ${marg_today[best_ch]:.2f} back per $1", delta_color="off")
-k2.metric("Most maxed-out channel", LABELS[worst_ch],
-          f"only ${marg_today[worst_ch]:.2f} back per extra $1", delta_color="off")
-k3.metric("Same budget, smarter split", f"{money(gain, sign=True)} a week",
-          f"{gain / ads_revenue(today) * 100:+.0f}% more sales from ads")
+card(k1, "🎯 Best next dollar", LABELS[best_ch],
+     f"${marg_today[best_ch]:.2f} back per extra $1")
+card(k2, "🧱 Most maxed out", LABELS[worst_ch],
+     f"Only ${marg_today[worst_ch]:.2f} back per extra $1")
+card(k3, "⭐ Smarter split", f"{money(gain, sign=True)}/week",
+     f"{gain / ads_revenue(today) * 100:.0f}% more sales, same budget")
 
 st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["🧪 Your plan", "💡 What's working", "📈 Next 12 weeks", "❓ How it works"])
@@ -127,13 +135,11 @@ with tab1:
     st.caption("Change the budget in the sidebar and these numbers update.")
     a, b, c_ = st.columns(3)
     a.metric("Weekly sales from ads", money(rev_plan),
-             f"{money(rev_plan - rev_today, sign=True)} vs today" if rev_plan != rev_today else "same as today",
-             delta_color="normal" if rev_plan != rev_today else "off")
+             f"{money(rev_plan - rev_today, sign=True)} vs today" if rev_plan != rev_today else None)
     b.metric("Back per $1 spent", f"${rev_plan / plan_total:.2f}" if plan_total else "n/a",
              f"{(rev_plan / plan_total) - (rev_today / today_total):+.2f} vs today"
              if plan_total and rev_plan != rev_today else None)
-    c_.metric("Over a year", money((rev_plan - rev_today) * 52, sign=True), "extra sales vs today's mix",
-              delta_color="off")
+    c_.metric("Change over a full year", money((rev_plan - rev_today) * 52, sign=True))
 
     # plain-language summary
     changes = sorted(CHANNELS, key=lambda c: plan[c] - today[c])
@@ -154,14 +160,14 @@ with tab1:
                  f"**{LABELS[lo]}** gives the least for extra money (about ${marg_plan[lo]:.2f}).")
     st.info(" ".join(lines))
 
+    st.markdown("**Weekly spend by channel: today vs. your plan**")
     fig = go.Figure()
     fig.add_trace(go.Bar(name="Today", x=[LABELS[c] for c in CHANNELS], y=[today[c] for c in CHANNELS],
                          marker_color="#C9C9C9"))
     fig.add_trace(go.Bar(name="Your plan", x=[LABELS[c] for c in CHANNELS], y=[plan[c] for c in CHANNELS],
                          marker_color=[COLORS[c] for c in CHANNELS]))
-    fig.update_layout(barmode="group", height=340, margin=dict(l=0, r=0, t=30, b=0),
-                      title="Weekly spend by channel", yaxis_title="Weekly spend ($)",
-                      legend=dict(orientation="h", y=1.12))
+    fig.update_layout(barmode="group", height=340, margin=dict(l=0, r=0, t=10, b=0),
+                      yaxis_title="Weekly spend ($)", legend=dict(orientation="h", y=-0.15, x=0))
     st.plotly_chart(fig, width="stretch")
 
 # ---------------- Tab 2: what's working ----------------
@@ -172,19 +178,25 @@ with tab2:
                 "pays off less as you spend more on it.")
     left, right = st.columns(2)
     with left:
+        st.markdown("**Average: $ back per $1, last year**")
         fig = go.Figure(go.Bar(x=summ["roas"], y=summ["channel"], orientation="h",
                                marker_color=[COLORS[k] for k in summ["key"]],
                                text=[f"${v:.2f}" for v in summ["roas"]], textposition="outside"))
-        fig.update_layout(height=300, margin=dict(l=0, r=50, t=40, b=0), title="Average: $ back per $1, last year",
-                          yaxis=dict(autorange="reversed"), xaxis=dict(showticklabels=False))
+        fig.update_traces(cliponaxis=False)
+        fig.update_layout(height=300, margin=dict(l=0, r=20, t=10, b=0),
+                          yaxis=dict(autorange="reversed"),
+                          xaxis=dict(showticklabels=False, showgrid=False, range=[0, summ["roas"].max() * 1.3]))
         st.plotly_chart(fig, width="stretch")
     with right:
+        st.markdown("**Next dollar: $ back per extra $1 today**")
         order = sorted(CHANNELS, key=lambda c: marg_today[c], reverse=True)
         fig = go.Figure(go.Bar(x=[marg_today[c] for c in order], y=[LABELS[c] for c in order], orientation="h",
                                marker_color=[COLORS[c] for c in order],
                                text=[f"${marg_today[c]:.2f}" for c in order], textposition="outside"))
-        fig.update_layout(height=300, margin=dict(l=0, r=50, t=40, b=0), title="Next dollar: $ back per extra $1 today",
-                          yaxis=dict(autorange="reversed"), xaxis=dict(showticklabels=False))
+        fig.update_traces(cliponaxis=False)
+        fig.update_layout(height=300, margin=dict(l=0, r=20, t=10, b=0),
+                          yaxis=dict(autorange="reversed"),
+                          xaxis=dict(showticklabels=False, showgrid=False, range=[0, max(marg_today.values()) * 1.3]))
         st.plotly_chart(fig, width="stretch")
 
     st.subheader("More spend, smaller gains")
@@ -225,15 +237,15 @@ with tab3:
     diff = fc_plan["forecast"].sum() - fc_today["forecast"].sum()
     if abs(diff) < 0.002 * fc_today["forecast"].sum():
         diff = 0.0
-    st.metric("Extra sales over the next 12 weeks", money(diff, sign=True), "your plan vs. today's mix",
-              delta_color="off")
+    st.metric("Extra sales over the next 12 weeks (your plan vs. today's mix)", money(diff, sign=True))
     hist = df.iloc[-26:]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=hist["DATE"], y=hist["revenue"], name="Past sales", line=dict(color="black")))
-    fig.add_trace(go.Scatter(x=fc_today["DATE"], y=fc_today["forecast"], name="Today's mix",
-                             line=dict(dash="dot", color="#888")))
-    fig.add_trace(go.Scatter(x=fc_plan["DATE"], y=fc_plan["forecast"], name="Your plan",
+    x0, y0 = [hist["DATE"].iloc[-1]], [hist["revenue"].iloc[-1]]
+    fig.add_trace(go.Scatter(x=x0 + list(fc_plan["DATE"]), y=y0 + list(fc_plan["forecast"]), name="Your plan", mode="lines",
                              line=dict(color="#E45756", width=3)))
+    fig.add_trace(go.Scatter(x=x0 + list(fc_today["DATE"]), y=y0 + list(fc_today["forecast"]), name="Today's mix", mode="lines",
+                             line=dict(dash="dot", color="#555", width=2)))
     fig.update_layout(height=400, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Weekly sales ($)",
                       legend=dict(orientation="h", y=-0.15))
     st.plotly_chart(fig, width="stretch")
